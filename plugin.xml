@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<plugin xmlns="http://apache.org/cordova/ns/plugins/1.0"
+        xmlns:android="http://schemas.android.com/apk/res/android"
+        id="cordova-plugin-browser"
+        version="1.0.0">
+    
+    <name>Browser</name>
+    <description>Cordova plugin that opens, closes, and navigates back in a WebView-like browser.</description>
+    <license>Apache 2.0</license>
+    <keywords>cordova, browser, webview</keywords>
+
+    <js-module src="www/Browser.js" name="Browser">
+        <clobbers target="window.Browser" />
+    </js-module>
+
+    <platform name="android">
+        <config-file parent="/*" target="res/xml/config.xml">
+            <feature name="Browser">
+                <param name="android-package" value="com.curbngo.browser.Browser" />
+            </feature>
+        </config-file>
+        <source-file src="src/android/Browser.java" target-dir="src/com/curbngo/browser" />
+        <source-file src="src/android/WebAppInterface.java" target-dir="src/com/curbngo/browser" />
+        <config-file parent="/*" target="AndroidManifest.xml"></config-file>
+    </platform>
+</plugin>

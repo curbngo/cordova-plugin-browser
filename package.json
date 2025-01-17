@@ -1,0 +1,28 @@
+{
+  "name": "cordova-plugin-browser",
+  "version": "1.0.0",
+  "description": "A Cordova plugin that provides a WebView for browsing.",
+  "main": "src/android/com/curbngo/browser/Browser.java",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "cordova",
+    "plugin",
+    "browser",
+    "webview"
+  ],
+  "author": "Curbngo USA LLC",
+  "license": "MIT",
+  "cordova": {
+    "platforms": [
+      "android"
+    ],
+    "engines": [
+      {
+        "name": "cordova",
+        "version": ">=9.0.0"
+      }
+    ]
+  }
+}
