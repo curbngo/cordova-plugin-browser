@@ -63,6 +63,16 @@ public class Browser extends CordovaPlugin {
                     LOG.d(TAG, "Showing WebView");
                     show(callbackContext);
                     return true;
+
+                case "executeScript":
+                    LOG.d(TAG, "Executing script in WebView");
+                    executeScript(args, callbackContext);
+                    return true;
+
+                case "navigate":
+                    LOG.d(TAG, "Navigating to URL in WebView");
+                    navigate(args, callbackContext);
+                    return true;
             }
         } catch (Exception e) {
             LOG.e(TAG, "Error processing action: " + e.getMessage());
@@ -180,14 +190,21 @@ public class Browser extends CordovaPlugin {
         cordova.getActivity().runOnUiThread(new Runnable() {
             @Override
             public void run() {
-                if (webView != null && webView.canGoBack()) {
-                    LOG.d(TAG, "Going back in WebView");
-                    webView.goBack();
-                    LOG.d(TAG, "Navigated back in WebView");
-                    callbackContext.success("Navigated back");
+                if (webView != null) {
+                    LOG.d(TAG, "WebView exists, canGoBack: " + webView.canGoBack());
+                    LOG.d(TAG, "Current URL: " + webView.getUrl());
+                    if (webView.canGoBack()) {
+                        LOG.d(TAG, "Going back in WebView");
+                        webView.goBack();
+                        LOG.d(TAG, "Navigated back in WebView");
+                        callbackContext.success("Navigated back");
+                    } else {
+                        LOG.e(TAG, "Cannot go back. WebView exists but no back history.");
+                        callbackContext.error("Cannot go back. WebView exists but no back history.");
+                    }
                 } else {
-                    LOG.e(TAG, "Cannot go back. Either no WebView or no back history.");
-                    callbackContext.error("Cannot go back. Either no WebView or no back history.");
+                    LOG.e(TAG, "Cannot go back. No WebView available.");
+                    callbackContext.error("Cannot go back. No WebView available.");
                 }
             }
         });
@@ -222,6 +239,69 @@ public class Browser extends CordovaPlugin {
                 } else {
                     LOG.e(TAG, "No WebView to show.");
                     callbackContext.error("No WebView to show.");
+                }
+            }
+        });
+    }
+
+    private void executeScript(final JSONArray args, final CallbackContext callbackContext) {
+        LOG.d(TAG, "executeScript method called");
+        cordova.getActivity().runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (webView != null) {
+                    try {
+                        JSONObject config = args.optJSONObject(0);
+                        if (config != null && config.has("code")) {
+                            String scriptCode = config.getString("code");
+                            LOG.d(TAG, "Executing script: " + scriptCode);
+                            
+                            webView.evaluateJavascript(scriptCode, new android.webkit.ValueCallback<String>() {
+                                @Override
+                                public void onReceiveValue(String value) {
+                                    LOG.d(TAG, "Script execution result: " + value);
+                                    callbackContext.success(value);
+                                }
+                            });
+                        } else {
+                            LOG.e(TAG, "Invalid config object or missing 'code' property");
+                            callbackContext.error("Invalid config object or missing 'code' property");
+                        }
+                    } catch (JSONException e) {
+                        LOG.e(TAG, "Error parsing config: " + e.getMessage());
+                        callbackContext.error("Error parsing config: " + e.getMessage());
+                    }
+                } else {
+                    LOG.e(TAG, "No WebView available to execute script");
+                    callbackContext.error("No WebView available to execute script");
+                }
+            }
+        });
+    }
+
+    private void navigate(final JSONArray args, final CallbackContext callbackContext) {
+        LOG.d(TAG, "navigate method called");
+        cordova.getActivity().runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (webView != null) {
+                    try {
+                        String url = args.optString(0, null);
+                        if (url != null && !url.isEmpty()) {
+                            LOG.d(TAG, "Navigating to URL: " + url);
+                            webView.loadUrl(url);
+                            callbackContext.success("Navigation started");
+                        } else {
+                            LOG.e(TAG, "Invalid URL provided for navigation");
+                            callbackContext.error("Invalid URL provided for navigation");
+                        }
+                    } catch (Exception e) {
+                        LOG.e(TAG, "Error during navigation: " + e.getMessage());
+                        callbackContext.error("Error during navigation: " + e.getMessage());
+                    }
+                } else {
+                    LOG.e(TAG, "No WebView available for navigation");
+                    callbackContext.error("No WebView available for navigation");
                 }
             }
         });

@@ -19,6 +19,14 @@ var Browser = {
 
     show: function(successCallback, errorCallback) {
         exec(successCallback, errorCallback, 'Browser', 'show', []);
+    },
+
+    executeScript: function(config, successCallback, errorCallback) {
+        exec(successCallback, errorCallback, 'Browser', 'executeScript', [config]);
+    },
+
+    navigate: function(url, successCallback, errorCallback) {
+        exec(successCallback, errorCallback, 'Browser', 'navigate', [url]);
     }
 };
 
