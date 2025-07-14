@@ -31,6 +31,9 @@ public class Browser extends CordovaPlugin {
     private WebView webView;
     private FrameLayout layout;
     private CallbackContext eventCallbackContext;
+    private String barcodeScanURL; // Track the barcode scan URL
+    private String[] whitelist; // Track whitelisted domains
+    private java.util.Timer domainCheckTimer; // Timer for domain checking
 
     @Override
     public boolean execute(String action, JSONArray args, CallbackContext callbackContext) {
@@ -90,19 +93,100 @@ public class Browser extends CordovaPlugin {
             return;
         }
 
+        // Extract optional barcodeScanURL from args
+        try {
+            JSONObject options = args.optJSONObject(1);
+            if (options != null && options.has("barcodeScanURL")) {
+                barcodeScanURL = options.getString("barcodeScanURL");
+                LOG.d(TAG, "Barcode scan URL set to: " + barcodeScanURL);
+            } else {
+                barcodeScanURL = null;
+            }
+            
+            // Extract optional whitelist from args and ensure it includes the initial domain
+            if (options != null && options.has("whitelist")) {
+                JSONArray whitelistArray = options.getJSONArray("whitelist");
+                whitelist = new String[whitelistArray.length() + 1]; // +1 for the initial domain
+                
+                // Add the initial domain first
+                try {
+                    java.net.URL urlObj = new java.net.URL(url);
+                    String initialDomain = urlObj.getHost();
+                    whitelist[0] = initialDomain;
+                    LOG.d(TAG, "Added initial domain to whitelist: " + initialDomain);
+                    
+                    // Add the provided whitelist domains
+                    for (int i = 0; i < whitelistArray.length(); i++) {
+                        String domain = whitelistArray.getString(i);
+                        whitelist[i + 1] = domain;
+                        if (domain.startsWith("*.")) {
+                            LOG.d(TAG, "Added wildcard domain to whitelist: " + domain);
+                        } else {
+                            LOG.d(TAG, "Added domain to whitelist: " + domain);
+                        }
+                    }
+                } catch (Exception e) {
+                    LOG.e(TAG, "Error parsing initial URL domain: " + e.getMessage());
+                    // Fallback: just use the provided whitelist
+                    whitelist = new String[whitelistArray.length()];
+                    for (int i = 0; i < whitelistArray.length(); i++) {
+                        whitelist[i] = whitelistArray.getString(i);
+                    }
+                }
+                LOG.d(TAG, "Whitelist set with " + whitelist.length + " domains (including initial domain)");
+            } else {
+                // No whitelist provided, create one with just the initial domain
+                try {
+                    java.net.URL urlObj = new java.net.URL(url);
+                    String initialDomain = urlObj.getHost();
+                    whitelist = new String[]{initialDomain};
+                    LOG.d(TAG, "Created whitelist with initial domain: " + initialDomain);
+                } catch (Exception e) {
+                    LOG.e(TAG, "Error parsing initial URL domain: " + e.getMessage());
+                    whitelist = null;
+                }
+            }
+        } catch (JSONException e) {
+            LOG.e(TAG, "Error parsing options: " + e.getMessage());
+            barcodeScanURL = null;
+            whitelist = null;
+        }
+
         cordova.getActivity().runOnUiThread(new Runnable() {
             @Override
             public void run() {
 
+                // Check if we can reuse the existing WebView
+                if (webView != null && layout != null && layout.getParent() != null) {
+                    LOG.d(TAG, "Reusing existing WebView for navigation to: " + url);
+                    LOG.d(TAG, "Current WebView state - canGoBack: " + webView.canGoBack() + ", current URL: " + webView.getUrl());
+                    
+                    // Update the whitelist and barcode scan URL for the new navigation
+                    // (these were already set above)
+                    
+                    // Navigate to the new URL
+                    webView.setVisibility(View.VISIBLE);
+                    webView.bringToFront();
+                    webView.loadUrl(url);
+                    
+                    PluginResult pluginResult = new PluginResult(PluginResult.Status.OK, "WebView navigated");
+                    pluginResult.setKeepCallback(true);
+                    callbackContext.sendPluginResult(pluginResult);
+                    return;
+                }
+
+                // Create new WebView only if one doesn't exist or is not properly set up
+                LOG.d(TAG, "Creating new WebView - existing WebView: " + (webView != null) + ", layout: " + (layout != null) + ", layout parent: " + (layout != null && layout.getParent() != null));
                 if (layout == null) {
                     layout = new FrameLayout(cordova.getContext());
                 } else {
                     // Remove any views from layout
                     layout.removeAllViews();
                 }
+                
                 // Destroy the existing WebView if it exists
                 if (webView != null) {
-                    LOG.d(TAG, "Destroying existing WebView before opening a new one");
+                    LOG.d(TAG, "Destroying existing WebView before creating a new one");
                     webView.destroy();
                     webView = null;
                 }
@@ -179,6 +263,15 @@ public class Browser extends CordovaPlugin {
                     layout.removeAllViews();
                     layout = null;
                 }
+
+                // Reset barcode scan URL
+                barcodeScanURL = null;
+
+                // Reset whitelist
+                whitelist = null;
+
+                // Stop domain checking timer
+                stopDomainCheckingTimer();
 
                 callbackContext.success("WebView closed and data cleared");
             }
@@ -307,12 +400,174 @@ public class Browser extends CordovaPlugin {
         });
     }
 
+    private boolean isDomainWhitelisted(String url) {
+        if (whitelist == null || whitelist.length == 0) {
+            LOG.w(TAG, "No whitelist configured, allowing all domains");
+            return true; // No whitelist means all domains are allowed
+        }
+        
+        try {
+            java.net.URL urlObj = new java.net.URL(url);
+            String domain = urlObj.getHost();
+            
+            for (String whitelistedDomain : whitelist) {
+                // Handle wildcard domains (e.g., *.shopify.com)
+                if (whitelistedDomain.startsWith("*.")) {
+                    String baseDomain = whitelistedDomain.substring(2); // Remove "*. "
+                    if (domain.equals(baseDomain) || domain.endsWith("." + baseDomain)) {
+                        LOG.d(TAG, "Domain " + domain + " is whitelisted (matches wildcard " + whitelistedDomain + ")");
+                        return true;
+                    }
+                }
+                // Handle exact domain matching and subdomain matching
+                else if (domain.equals(whitelistedDomain) || domain.endsWith("." + whitelistedDomain)) {
+                    LOG.d(TAG, "Domain " + domain + " is whitelisted (matches " + whitelistedDomain + ")");
+                    return true;
+                }
+            }
+            LOG.d(TAG, "Domain " + domain + " is not whitelisted. Whitelist: " + java.util.Arrays.toString(whitelist));
+            return false;
+        } catch (Exception e) {
+            LOG.e(TAG, "Error parsing URL for whitelist check: " + e.getMessage());
+            return false;
+        }
+    }
+
+    private void startDomainCheckingTimer() {
+        // Stop any existing timer
+        stopDomainCheckingTimer();
+        
+        if (whitelist == null || whitelist.length == 0) {
+            LOG.d(TAG, "No whitelist configured, skipping domain checking timer");
+            return;
+        }
+        
+        LOG.d(TAG, "Starting domain checking timer with whitelist: " + java.util.Arrays.toString(whitelist));
+        domainCheckTimer = new java.util.Timer();
+        domainCheckTimer.scheduleAtFixedRate(new java.util.TimerTask() {
+            @Override
+            public void run() {
+                if (webView != null) {
+                    cordova.getActivity().runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            String currentUrl = webView.getUrl();
+                            if (currentUrl != null && !isDomainWhitelisted(currentUrl)) {
+                                LOG.d(TAG, "Current domain is not whitelisted, navigating back: " + currentUrl);
+                                if (webView.canGoBack()) {
+                                    webView.goBack();
+                                } else {
+                                    // If we can't go back, load a blank page
+                                    webView.loadUrl("about:blank");
+                                }
+                            }
+                        }
+                    });
+                }
+            }
+        }, 1000, 1000); // Start after 1 second, repeat every 1 second
+    }
+
+    private void stopDomainCheckingTimer() {
+        if (domainCheckTimer != null) {
+            LOG.d(TAG, "Stopping domain checking timer");
+            domainCheckTimer.cancel();
+            domainCheckTimer = null;
+        }
+    }
+
+    private void injectBarcodeScanningScript(WebView view) {
+        if (barcodeScanURL == null || barcodeScanURL.isEmpty()) {
+            LOG.d(TAG, "No barcode scan URL configured, skipping barcode script injection");
+            return;
+        }
+        
+        LOG.d(TAG, "Injecting barcode scanning script for URL: " + barcodeScanURL);
+        
+        String barcodeScript = 
+            "var cngPageInitialized = false;" +
+            "function cngPageInit(){" +
+            "if(cngPageInitialized)" +
+            "return;" +
+            "cngPageInitialized = true;" +
+            "initBarcodeListener = function () {" +
+            "barcodeScannerInitialized = Boolean(true);" +
+            "barcode_timeoutHandler = 0;" +
+            "barcode_inputString = '';" +
+            "barcode_onKeypress = function (ev) {" +
+            "if (ev.target.tagName === 'INPUT' || ev.target.tagName === 'TEXTAREA') return;" +
+            "if (barcode_timeoutHandler) clearTimeout(barcode_timeoutHandler);" +
+            "if (ev.key == 'Enter') {" +
+            "window.location = window.location.origin + '" + barcodeScanURL + "' + barcode_inputString;" +
+            "barcode_inputString = '';" +
+            "return;" +
+            "}" +
+            "barcode_inputString += ev.key;" +
+            "barcode_timeoutHandler = setTimeout(function () {" +
+            "if (barcode_inputString.length <= 3) {" +
+            "barcode_inputString = '';" +
+            "return;" +
+            "}" +
+            "barcode_inputString = '';" +
+            "}, 200);" +
+            "};" +
+            "document.addEventListener('keypress', barcode_onKeypress, { passive: true });" +
+            "};" +
+            "initBarcodeListener();" +
+            "var vp = document.querySelector('meta[name=viewport]');" +
+            "if (typeof vp !== 'undefined' && vp) vp.setAttribute('content', 'width=device-width');" +
+            "else {" +
+            "var meta = document.createElement('meta');" +
+            "meta.name = 'viewport';" +
+            "meta.content = 'width=device-width';" +
+            "document.getElementsByTagName('head')[0].appendChild(meta);" +
+            "}" +
+            "var cEventList = ['keyup', 'touchstart'/*, 'click', 'touchend', 'mousedown', 'mouseup'*/];" +
+            "cEventList.forEach(function (eventName) {" +
+            "window.addEventListener(eventName, function (e) {" +
+            "window['webkit'].messageHandlers['cordova_iab'].postMessage(JSON.stringify({" +
+            "active: true," +
+            "type: e.type" +
+            "}));" +
+            "}, { passive: true });" +
+            "});" +
+            "if(typeof ShopifyAnalytics.meta !== 'undefined' && typeof ShopifyAnalytics.meta.page !== 'undefined' && typeof ShopifyAnalytics.meta.page.customerId !== 'undefined')" +
+            "window['webkit'].messageHandlers['cordova_iab'].postMessage(JSON.stringify({" +
+            "logged_in: true" +
+            "}));" +
+            "}" +
+            "cngPageInit();";
+        
+        view.evaluateJavascript(barcodeScript, new android.webkit.ValueCallback<String>() {
+            @Override
+            public void onReceiveValue(String value) {
+                LOG.d(TAG, "Barcode scanning script injected successfully");
+            }
+        });
+    }
+
     private void setupWebViewClient() {
         webView.setWebViewClient(new WebViewClient() {
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                String url = request.getUrl().toString();
+                if (!isDomainWhitelisted(url)) {
+                    LOG.d(TAG, "Blocking navigation to non-whitelisted domain: " + url);
+                    return true; // Block the navigation
+                }
+                return false; // Allow the navigation
+            }
+            
             @Override
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
                 LOG.e(TAG, "onPageFinished");
+                
+                // Start domain checking timer if whitelist is configured
+                startDomainCheckingTimer();
+                
+                // Inject barcode scanning script if configured
+                injectBarcodeScanningScript(view);
                 
                 // Ensure this is called after the page is fully loaded
                 view.evaluateJavascript(
@@ -330,5 +585,11 @@ public class Browser extends CordovaPlugin {
                 );
             }
         });
+    }
+    
+    @Override
+    public void onDestroy() {
+        stopDomainCheckingTimer();
+        super.onDestroy();
     }
 }
