@@ -174,14 +174,47 @@ public class Browser extends CordovaPlugin {
                 // Create a new WebView
                 webView = new WebView(cordova.getContext());
                 setupWebViewClient();
-                webView.getSettings().setJavaScriptEnabled(true);
+                
+                // Configure WebView settings to mimic real browser
+                android.webkit.WebSettings settings = webView.getSettings();
+                settings.setJavaScriptEnabled(true);
                 
                 // Enable DOM storage
-                webView.getSettings().setDomStorageEnabled(true); // Enable localStorage
+                settings.setDomStorageEnabled(true);
+                settings.setDatabaseEnabled(true);
+                
+                // Enable file access and content URLs
+                settings.setAllowFileAccess(true);
+                settings.setAllowContentAccess(true);
+                settings.setAllowFileAccessFromFileURLs(true);
+                settings.setAllowUniversalAccessFromFileURLs(true);
+                
+                // Cache and loading settings
+                settings.setCacheMode(android.webkit.WebSettings.LOAD_DEFAULT);
+                
+                // Media and content settings
+                settings.setMediaPlaybackRequiresUserGesture(false);
+                settings.setMixedContentMode(android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+                
+                // Display and interaction settings
+                settings.setSupportZoom(true);
+                settings.setBuiltInZoomControls(true);
+                settings.setDisplayZoomControls(false);
+                settings.setLoadWithOverviewMode(true);
+                settings.setUseWideViewPort(true);
+                
+                // Additional browser-like settings
+                settings.setGeolocationEnabled(true);
+                settings.setJavaScriptCanOpenWindowsAutomatically(true);
+                settings.setSupportMultipleWindows(true);
+                
+                // Use system default User-Agent (more authentic than hardcoded)
+                // settings.setUserAgentString() - commented out to use system default
 
-                // Set a custom User-Agent
-                String customUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36";
-                webView.getSettings().setUserAgentString(customUserAgent);
+                // Enable cookies
+                CookieManager cookieManager = CookieManager.getInstance();
+                cookieManager.setAcceptCookie(true);
+                cookieManager.setAcceptThirdPartyCookies(webView, true);
 
                 // Add JavaScript interface
                 webView.addJavascriptInterface(new WebAppInterface(eventCallbackContext), "Android");
@@ -224,7 +257,40 @@ public class Browser extends CordovaPlugin {
                 if (webView != null) {
                     // Clear cookies, localStorage, etc.
                     CookieManager.getInstance().removeAllCookies(null);
-                    webView.evaluateJavascript("localStorage.clear(); sessionStorage.clear();", null);
+                    
+                    // Clear storage and unregister service workers
+                    String cleanupScript = 
+                        "try {" +
+                        "localStorage.clear();" +
+                        "sessionStorage.clear();" +
+                        "if ('serviceWorker' in navigator) {" +
+                        "navigator.serviceWorker.getRegistrations().then(function(registrations) {" +
+                        "for(let registration of registrations) {" +
+                        "registration.unregister();" +
+                        "}" +
+                        "});" +
+                        "}" +
+                        "if ('caches' in window) {" +
+                        "caches.keys().then(function(cacheNames) {" +
+                        "return Promise.all(" +
+                        "cacheNames.map(function(cacheName) {" +
+                        "return caches.delete(cacheName);" +
+                        "})" +
+                        ");" +
+                        "});" +
+                        "}" +
+                        "if ('indexedDB' in window) {" +
+                        "try {" +
+                        "indexedDB.databases().then(function(databases) {" +
+                        "databases.forEach(function(db) {" +
+                        "indexedDB.deleteDatabase(db.name);" +
+                        "});" +
+                        "});" +
+                        "} catch(e) {}" +
+                        "}" +
+                        "} catch(e) { console.log('Cleanup error:', e); }";
+                    
+                    webView.evaluateJavascript(cleanupScript, null);
 
                     webView.setVisibility(View.GONE);
                     webView.loadUrl("about:blank");
@@ -431,14 +497,14 @@ public class Browser extends CordovaPlugin {
             "var cEventList = ['keyup', 'touchstart'];" +
             "cEventList.forEach(function (eventName) {" +
             "window.addEventListener(eventName, function (e) {" +
-            "window['webkit'].messageHandlers['cordova_iab'].postMessage(JSON.stringify({" +
+            "Android.postMessage(JSON.stringify({" +
             "active: true," +
             "type: e.type" +
             "}));" +
             "}, { passive: true });" +
             "});" +
-            "if(typeof ShopifyAnalytics.meta !== 'undefined' && typeof ShopifyAnalytics.meta.page !== 'undefined' && typeof ShopifyAnalytics.meta.page.customerId !== 'undefined')" +
-            "window['webkit'].messageHandlers['cordova_iab'].postMessage(JSON.stringify({" +
+            "if(typeof ShopifyAnalytics !== 'undefined' && typeof ShopifyAnalytics.meta !== 'undefined' && typeof ShopifyAnalytics.meta.page !== 'undefined' && typeof ShopifyAnalytics.meta.page.customerId !== 'undefined')" +
+            "Android.postMessage(JSON.stringify({" +
             "logged_in: true" +
             "}));" +
             "}" +
@@ -459,8 +525,58 @@ public class Browser extends CordovaPlugin {
             }
             
             @Override
+            public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                // Add proper headers to make requests look like real browser
+                Map<String, String> headers = new HashMap<>();
+                headers.put("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8");
+                headers.put("Accept-Language", "en-US,en;q=0.9");
+                headers.put("Accept-Encoding", "gzip, deflate, br");
+                headers.put("DNT", "1");
+                headers.put("Connection", "keep-alive");
+                headers.put("Upgrade-Insecure-Requests", "1");
+                headers.put("Sec-Fetch-Dest", "document");
+                headers.put("Sec-Fetch-Mode", "navigate");
+                headers.put("Sec-Fetch-Site", "none");
+                headers.put("Sec-Fetch-User", "?1");
+                headers.put("Cache-Control", "max-age=0");
+                
+                return super.shouldInterceptRequest(view, request);
+            }
+            
+            @Override
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
+                
+                // Inject browser APIs and characteristics that Cloudflare checks
+                String browserEnhancementScript = 
+                    "try {" +
+                    // Add missing navigator properties
+                    "if (!navigator.webdriver) Object.defineProperty(navigator, 'webdriver', {get: () => undefined});" +
+                    "if (!navigator.plugins) Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});" +
+                    "if (!navigator.languages) Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});" +
+                    "if (!navigator.hardwareConcurrency) Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 4});" +
+                    "if (!navigator.deviceMemory) Object.defineProperty(navigator, 'deviceMemory', {get: () => 8});" +
+                    "if (!navigator.maxTouchPoints) Object.defineProperty(navigator, 'maxTouchPoints', {get: () => 5});" +
+                    // Add chrome object
+                    "if (!window.chrome) window.chrome = {runtime: {}};" +
+                    // Add performance object
+                    "if (!window.performance.memory) {" +
+                    "Object.defineProperty(window.performance, 'memory', {" +
+                    "get: () => ({usedJSHeapSize: 10000000, totalJSHeapSize: 20000000, jsHeapSizeLimit: 40000000})" +
+                    "});" +
+                    "}" +
+                    // Add screen properties
+                    "Object.defineProperty(screen, 'availTop', {get: () => 0});" +
+                    "Object.defineProperty(screen, 'availLeft', {get: () => 0});" +
+                    // Add missing Permission API
+                    "if (!navigator.permissions) {" +
+                    "navigator.permissions = {" +
+                    "query: function() { return Promise.resolve({state: 'granted'}); }" +
+                    "};" +
+                    "}" +
+                    "} catch(e) { console.log('Browser enhancement error:', e); }";
+                
+                view.evaluateJavascript(browserEnhancementScript, null);
                 
                 // Only inject barcode scanning script if configured
                 if (barcodeScanURL != null && !barcodeScanURL.isEmpty()) {
