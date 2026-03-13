@@ -9,7 +9,6 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
-import android.content.Intent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.webkit.CookieManager;
@@ -17,13 +16,9 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.FrameLayout;
 import android.webkit.WebResourceRequest;
-import android.webkit.WebResourceResponse;
 
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Set;
-import java.util.Map;
-import java.util.UUID;
 import com.curbngo.browser.WebAppInterface;
 
 public class Browser extends CordovaPlugin {
@@ -144,6 +139,17 @@ public class Browser extends CordovaPlugin {
             @Override
             public void run() {
 
+                // Clear session data before every open so each session starts clean
+                CookieManager.getInstance().removeAllCookies(null);
+                if (webView != null) {
+                    webView.evaluateJavascript(
+                        "localStorage.clear(); sessionStorage.clear();" +
+                        "if('caches' in window) caches.keys().then(k=>k.forEach(n=>caches.delete(n)));" +
+                        "if('indexedDB' in window) { try { indexedDB.databases().then(dbs=>dbs.forEach(db=>indexedDB.deleteDatabase(db.name))); } catch(e) {} }",
+                        null
+                    );
+                }
+
                 // Check if we can reuse the existing WebView
                 if (webView != null && layout != null && layout.getParent() != null) {
                     // Navigate to the new URL
@@ -191,6 +197,7 @@ public class Browser extends CordovaPlugin {
                 
                 // Cache and loading settings
                 settings.setCacheMode(android.webkit.WebSettings.LOAD_DEFAULT);
+                settings.setSafeBrowsingEnabled(false);
                 
                 // Media and content settings
                 settings.setMediaPlaybackRequiresUserGesture(false);
@@ -218,6 +225,12 @@ public class Browser extends CordovaPlugin {
 
                 // Add JavaScript interface
                 webView.addJavascriptInterface(new WebAppInterface(eventCallbackContext), "Android");
+
+                // Hardware acceleration and renderer priority
+                webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                    webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, true);
+                }
 
                 // Enable vertical scrolling
                 webView.setVerticalScrollBarEnabled(true);
@@ -522,25 +535,6 @@ public class Browser extends CordovaPlugin {
                     return true; // Block the navigation
                 }
                 return false; // Allow the navigation
-            }
-            
-            @Override
-            public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
-                // Add proper headers to make requests look like real browser
-                Map<String, String> headers = new HashMap<>();
-                headers.put("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8");
-                headers.put("Accept-Language", "en-US,en;q=0.9");
-                headers.put("Accept-Encoding", "gzip, deflate, br");
-                headers.put("DNT", "1");
-                headers.put("Connection", "keep-alive");
-                headers.put("Upgrade-Insecure-Requests", "1");
-                headers.put("Sec-Fetch-Dest", "document");
-                headers.put("Sec-Fetch-Mode", "navigate");
-                headers.put("Sec-Fetch-Site", "none");
-                headers.put("Sec-Fetch-User", "?1");
-                headers.put("Cache-Control", "max-age=0");
-                
-                return super.shouldInterceptRequest(view, request);
             }
             
             @Override
