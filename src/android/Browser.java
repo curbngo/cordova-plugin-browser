@@ -9,12 +9,19 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import android.os.Handler;
+import android.os.Looper;
+import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.webkit.CookieManager;
+import android.webkit.WebChromeClient;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.FrameLayout;
+import android.widget.LinearLayout;
+import android.widget.ProgressBar;
+import android.widget.TextView;
 import android.webkit.WebResourceRequest;
 
 import java.util.HashSet;
@@ -31,6 +38,17 @@ public class Browser extends CordovaPlugin {
     private String barcodeScanURL; // Track the barcode scan URL
     private Set<String> whitelistDomains; // Use HashSet for faster lookup
     private boolean shopifyHelpersEnabled = false; // Inject the Shopify product-page variant-race fix
+
+    // Native loading overlay shown over the WebView during navigation, so the
+    // kiosk shows progress instead of a blank page before content paints.
+    private static final String DEFAULT_LOADER_TEXT = "Loading\u2026";
+    private static final long LOADER_MAX_MS = 12000L; // failsafe: never trap the user behind it
+    private FrameLayout loaderView;
+    private TextView loaderLabel;
+    private boolean loaderEnabled = true;
+    private String loaderText = DEFAULT_LOADER_TEXT;
+    private final Handler loaderHandler = new Handler(Looper.getMainLooper());
+    private Runnable loaderTimeoutRunnable;
 
     @Override
     public boolean execute(String action, JSONArray args, CallbackContext callbackContext) {
@@ -89,6 +107,16 @@ public class Browser extends CordovaPlugin {
             }
 
             shopifyHelpersEnabled = options != null && options.optBoolean("shopifyHelpers", false);
+
+            // Native loading overlay: on by default; pass loader:false to disable, loaderLabel to customise.
+            loaderEnabled = options == null || options.optBoolean("loader", true);
+            loaderText = DEFAULT_LOADER_TEXT;
+            if (options != null) {
+                String lt = options.optString("loaderLabel", null);
+                if (lt != null && !lt.isEmpty()) {
+                    loaderText = lt;
+                }
+            }
 
             // Extract optional whitelist from args and ensure it includes the initial domain
             if (options != null && options.has("whitelist")) {
@@ -158,8 +186,12 @@ public class Browser extends CordovaPlugin {
                     // Navigate to the new URL
                     webView.setVisibility(View.VISIBLE);
                     webView.bringToFront();
+                    showLoader();
+                    if (loaderView != null) {
+                        loaderView.bringToFront();
+                    }
                     webView.loadUrl(url);
-                    
+
                     PluginResult pluginResult = new PluginResult(PluginResult.Status.OK, "WebView navigated");
                     pluginResult.setKeepCallback(true);
                     callbackContext.sendPluginResult(pluginResult);
@@ -183,7 +215,17 @@ public class Browser extends CordovaPlugin {
                 // Create a new WebView
                 webView = new WebView(cordova.getContext());
                 setupWebViewClient();
-                
+                webView.setWebChromeClient(new WebChromeClient() {
+                    @Override
+                    public void onProgressChanged(WebView view, int newProgress) {
+                        // Hide the loader as soon as the page is mostly there; onPageFinished
+                        // (in the WebViewClient) is the slower fallback, and LOADER_MAX_MS the failsafe.
+                        if (newProgress >= 85) {
+                            hideLoader();
+                        }
+                    }
+                });
+
                 // Configure WebView settings to mimic real browser
                 android.webkit.WebSettings settings = webView.getSettings();
                 settings.setJavaScriptEnabled(true);
@@ -244,6 +286,14 @@ public class Browser extends CordovaPlugin {
                 layout = new FrameLayout(cordova.getContext());
                 layout.addView(webView);
 
+                // Add the native loading overlay on top of the WebView (same bounds as `layout`,
+                // so it inherits the offsetTop margin). Starts hidden.
+                buildLoaderView();
+                layout.addView(loaderView, new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT
+                ));
+
                 // Add the layout to the Cordova activity's view with adjusted height
                 FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
                     FrameLayout.LayoutParams.MATCH_PARENT,
@@ -257,6 +307,8 @@ public class Browser extends CordovaPlugin {
 
                 webView.setVisibility(View.VISIBLE);
                 webView.bringToFront();
+                showLoader();
+                loaderView.bringToFront(); // keep the overlay above the WebView after bringToFront()
                 webView.loadUrl(url);
 
                 PluginResult pluginResult = new PluginResult(PluginResult.Status.OK, "WebView opened");
@@ -314,6 +366,16 @@ public class Browser extends CordovaPlugin {
                     webView = null;
                 }
                 
+                // Tear down the loader overlay and cancel its failsafe
+                if (loaderTimeoutRunnable != null) {
+                    loaderHandler.removeCallbacks(loaderTimeoutRunnable);
+                    loaderTimeoutRunnable = null;
+                }
+                loaderView = null;
+                loaderLabel = null;
+                loaderEnabled = true;
+                loaderText = DEFAULT_LOADER_TEXT;
+
                 // Also remove the layout from the parent
                 if (layout != null) {
                     ViewGroup parentView = (ViewGroup) layout.getParent();
@@ -362,6 +424,7 @@ public class Browser extends CordovaPlugin {
             public void run() {
                 if (webView != null) {
                     webView.setVisibility(View.GONE);
+                    hideLoader(); // don't leave the spinner up when the shell is hidden
                     callbackContext.success("WebView hidden");
                 } else {
                     callbackContext.error("No WebView to hide.");
@@ -434,6 +497,81 @@ public class Browser extends CordovaPlugin {
                 }
             }
         });
+    }
+
+    // --- Native loading overlay ---------------------------------------------
+
+    private int dp(int value) {
+        float density = cordova.getContext().getResources().getDisplayMetrics().density;
+        return Math.round(value * density);
+    }
+
+    /** Builds the loader overlay (spinner + label) into {@link #loaderView}. Starts hidden. */
+    private void buildLoaderView() {
+        android.content.Context ctx = cordova.getContext();
+
+        loaderView = new FrameLayout(ctx);
+        loaderView.setBackgroundColor(0xF2FFFFFF); // ~95% white so the page faintly shows through
+        loaderView.setClickable(true);             // swallow taps while visible
+        loaderView.setFocusable(true);
+        loaderView.setVisibility(View.GONE);
+
+        LinearLayout box = new LinearLayout(ctx);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setGravity(Gravity.CENTER);
+        loaderView.addView(box, new FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            Gravity.CENTER));
+
+        ProgressBar spinner = new ProgressBar(ctx, null, android.R.attr.progressBarStyleLarge);
+        spinner.setIndeterminate(true);
+        int sz = dp(64);
+        box.addView(spinner, new LinearLayout.LayoutParams(sz, sz));
+
+        loaderLabel = new TextView(ctx);
+        loaderLabel.setText(loaderText);
+        loaderLabel.setTextColor(0xFF555555);
+        loaderLabel.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 15);
+        loaderLabel.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams labelLp = new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT);
+        labelLp.topMargin = dp(16);
+        box.addView(loaderLabel, labelLp);
+    }
+
+    /** Shows the loader overlay and arms the failsafe auto-hide. UI-thread only. */
+    private void showLoader() {
+        if (!loaderEnabled || loaderView == null) {
+            return;
+        }
+        if (loaderLabel != null) {
+            loaderLabel.setText(loaderText);
+        }
+        loaderView.setVisibility(View.VISIBLE);
+        loaderView.bringToFront();
+        if (loaderTimeoutRunnable != null) {
+            loaderHandler.removeCallbacks(loaderTimeoutRunnable);
+        }
+        loaderTimeoutRunnable = new Runnable() {
+            @Override
+            public void run() {
+                hideLoader();
+            }
+        };
+        loaderHandler.postDelayed(loaderTimeoutRunnable, LOADER_MAX_MS);
+    }
+
+    /** Hides the loader overlay and cancels the failsafe. UI-thread only. */
+    private void hideLoader() {
+        if (loaderTimeoutRunnable != null) {
+            loaderHandler.removeCallbacks(loaderTimeoutRunnable);
+            loaderTimeoutRunnable = null;
+        }
+        if (loaderView != null) {
+            loaderView.setVisibility(View.GONE);
+        }
     }
 
     private boolean isDomainWhitelisted(String url) {
@@ -627,6 +765,12 @@ public class Browser extends CordovaPlugin {
             @Override
             public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
                 super.onPageStarted(view, url, favicon);
+                // Show the native loader for the whole navigation lifecycle (covers the blank
+                // pre-paint window that the JS overlay can't reach).
+                showLoader();
+                if (loaderView != null) {
+                    loaderView.bringToFront();
+                }
                 // Inject as early as possible so the variant-id backstop and loading
                 // overlay are in place before the user can interact with a slow page.
                 if (shopifyHelpersEnabled) {
@@ -635,9 +779,19 @@ public class Browser extends CordovaPlugin {
             }
 
             @Override
+            public void onReceivedError(WebView view, WebResourceRequest request, android.webkit.WebResourceError error) {
+                super.onReceivedError(view, request, error);
+                if (request != null && request.isForMainFrame()) {
+                    hideLoader();
+                }
+            }
+
+            @Override
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
-                
+
+                hideLoader();
+
                 // Inject browser APIs and characteristics that Cloudflare checks
                 String browserEnhancementScript = 
                     "try {" +
