@@ -30,6 +30,7 @@ public class Browser extends CordovaPlugin {
     private CallbackContext eventCallbackContext;
     private String barcodeScanURL; // Track the barcode scan URL
     private Set<String> whitelistDomains; // Use HashSet for faster lookup
+    private boolean shopifyHelpersEnabled = false; // Inject the Shopify product-page variant-race fix
 
     @Override
     public boolean execute(String action, JSONArray args, CallbackContext callbackContext) {
@@ -86,7 +87,9 @@ public class Browser extends CordovaPlugin {
             } else {
                 barcodeScanURL = null;
             }
-            
+
+            shopifyHelpersEnabled = options != null && options.optBoolean("shopifyHelpers", false);
+
             // Extract optional whitelist from args and ensure it includes the initial domain
             if (options != null && options.has("whitelist")) {
                 JSONArray whitelistArray = options.getJSONArray("whitelist");
@@ -327,6 +330,9 @@ public class Browser extends CordovaPlugin {
                 // Reset whitelist
                 whitelistDomains = null;
 
+                // Reset Shopify helpers flag
+                shopifyHelpersEnabled = false;
+
                 callbackContext.success("WebView closed and data cleared");
             }
         });
@@ -526,6 +532,72 @@ public class Browser extends CordovaPlugin {
         view.evaluateJavascript(barcodeScript, null);
     }
 
+    /**
+     * Injected on Shopify web shells. Fixes the variant-race on slow kiosks:
+     *  - shows a brief touch-blocking spinner overlay on /products/ pages until
+     *    the theme's <variant-radios>/<variant-selects>/<product-form> custom
+     *    elements are defined (i.e. the theme JS is hydrated), so fast taps can't
+     *    land before the page is wired up; and
+     *  - keeps the product form's hidden `id` input in sync with the currently
+     *    selected option values by reading the variant JSON embedded in the
+     *    picker element, so add-to-cart always submits the right variant even if
+     *    the theme JS hasn't run yet (Dawn-lineage themes).
+     * Idempotent per document via the window.__cngShopifyHelpers guard.
+     */
+    private void injectShopifyHelpers(WebView view) {
+        if (view == null) {
+            return;
+        }
+        String js =
+            "(function(){" +
+            "if(window.__cngShopifyHelpers)return;" +
+            "window.__cngShopifyHelpers=true;" +
+            "var OV='__cngShopifyOverlay',MAXMS=8000,dismissed=false;" +
+            "function isProductPage(){return /\\/products\\//.test(location.pathname);}" +
+            "function pickers(){return document.querySelectorAll('variant-radios,variant-selects');}" +
+            "function showOverlay(){try{if(document.getElementById(OV))return;" +
+            "var d=document.createElement('div');d.id=OV;" +
+            "d.style.cssText='position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483647;background:rgba(255,255,255,0.92);display:flex;align-items:center;justify-content:center;';" +
+            "var s=document.createElement('div');" +
+            "s.style.cssText='width:46px;height:46px;border:5px solid rgba(0,0,0,0.15);border-top-color:rgba(0,0,0,0.55);border-radius:50%;animation:__cngspin 0.8s linear infinite;';" +
+            "var st=document.createElement('style');st.textContent='@keyframes __cngspin{to{transform:rotate(360deg)}}';" +
+            "d.appendChild(st);d.appendChild(s);(document.body||document.documentElement).appendChild(d);}catch(e){}}" +
+            "function hideOverlay(){try{var d=document.getElementById(OV);if(d&&d.parentNode)d.parentNode.removeChild(d);}catch(e){}}" +
+            "function pickerForm(p){" +
+            "try{var i=p.querySelector('[form]');if(i){var f=document.getElementById(i.getAttribute('form'));if(f)return f;}}catch(e){}" +
+            "try{if(p.closest){var f2=p.closest('form');if(f2)return f2;var pf=p.closest('product-form');if(pf){var f3=pf.querySelector('form');if(f3)return f3;}}}catch(e){}" +
+            "return document.querySelector('form[action*=\"/cart/add\"]');}" +
+            "function optsOf(v){return v.options||[v.option1,v.option2,v.option3].filter(function(x){return x!=null;});}" +
+            "function matchVariant(vs,picked){var i,k,o;" +
+            "for(i=0;i<vs.length;i++){o=optsOf(vs[i]);if(o.length!==picked.length)continue;var ok=true;for(k=0;k<o.length;k++){if(String(o[k])!==String(picked[k])){ok=false;break;}}if(ok)return vs[i];}" +
+            "for(i=0;i<vs.length;i++){o=optsOf(vs[i]);if(o.length!==picked.length)continue;var all=true;for(k=0;k<o.length;k++){if(picked.indexOf(String(o[k]))===-1){all=false;break;}}if(all)return vs[i];}" +
+            "return null;}" +
+            "function syncPicker(p){try{" +
+            "var j=p.querySelector('script[type=\"application/json\"]');if(!j)return;" +
+            "var vs=JSON.parse(j.textContent);if(!Array.isArray(vs)||!vs.length)return;" +
+            "var picked=[],i;var rs=p.querySelectorAll('input[type=\"radio\"]:checked');" +
+            "if(rs.length){for(i=0;i<rs.length;i++)picked.push(rs[i].value);}else{var ss=p.querySelectorAll('select');for(i=0;i<ss.length;i++)picked.push(ss[i].value);}" +
+            "if(!picked.length)return;var v=matchVariant(vs,picked);if(!v)return;" +
+            "var f=pickerForm(p);if(!f)return;" +
+            "var inp=f.querySelector('input[name=\"id\"]');" +
+            "if(!inp){inp=document.createElement('input');inp.type='hidden';inp.name='id';f.appendChild(inp);}" +
+            "if(String(inp.value)!==String(v.id))inp.value=String(v.id);}catch(e){}}" +
+            "function syncAll(){try{var ps=pickers();for(var i=0;i<ps.length;i++)syncPicker(ps[i]);}catch(e){}}" +
+            "function isVariantControl(t){try{return !!(t&&t.closest&&t.closest('variant-radios,variant-selects'));}catch(e){return false;}}" +
+            "document.addEventListener('change',function(e){if(isVariantControl(e.target))syncAll();},true);" +
+            "document.addEventListener('submit',function(e){var f=e.target;if(f&&f.tagName==='FORM'&&/\\/cart\\/add/.test(f.getAttribute('action')||''))syncAll();},true);" +
+            "document.addEventListener('click',function(e){try{var b=e.target&&e.target.closest?e.target.closest('[name=\"add\"]'):null;if(b)syncAll();}catch(err){}},true);" +
+            "function dismiss(){if(dismissed)return;dismissed=true;syncAll();hideOverlay();}" +
+            "function onReady(){var waits=[];try{if(window.customElements){['variant-radios','variant-selects','product-form','product-info'].forEach(function(t){if(document.querySelector(t))waits.push(customElements.whenDefined(t).catch(function(){}));});}}catch(e){}" +
+            "if(waits.length){Promise.all(waits).then(function(){setTimeout(dismiss,50);});}else{dismiss();}}" +
+            "if(isProductPage())showOverlay();" +
+            "setTimeout(dismiss,MAXMS);" +
+            "if(document.readyState==='complete'){setTimeout(dismiss,0);}else{window.addEventListener('load',function(){setTimeout(dismiss,0);},{once:true});}" +
+            "if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',onReady,{once:true});}else{onReady();}" +
+            "})();";
+        view.evaluateJavascript(js, null);
+    }
+
     private void setupWebViewClient() {
         webView.setWebViewClient(new WebViewClient() {
             @Override
@@ -536,7 +608,17 @@ public class Browser extends CordovaPlugin {
                 }
                 return false; // Allow the navigation
             }
-            
+
+            @Override
+            public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
+                super.onPageStarted(view, url, favicon);
+                // Inject as early as possible so the variant-id backstop and loading
+                // overlay are in place before the user can interact with a slow page.
+                if (shopifyHelpersEnabled) {
+                    injectShopifyHelpers(view);
+                }
+            }
+
             @Override
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
@@ -575,6 +657,11 @@ public class Browser extends CordovaPlugin {
                 // Only inject barcode scanning script if configured
                 if (barcodeScanURL != null && !barcodeScanURL.isEmpty()) {
                     injectBarcodeScanningScript(view);
+                }
+
+                // Re-run the Shopify helpers as a fallback (idempotent via a window guard)
+                if (shopifyHelpersEnabled) {
+                    injectShopifyHelpers(view);
                 }
                 
                 // Only add event listeners if we have a callback context
