@@ -563,10 +563,17 @@ public class Browser extends CordovaPlugin {
             "var st=document.createElement('style');st.textContent='@keyframes __cngspin{to{transform:rotate(360deg)}}';" +
             "d.appendChild(st);d.appendChild(s);(document.body||document.documentElement).appendChild(d);}catch(e){}}" +
             "function hideOverlay(){try{var d=document.getElementById(OV);if(d&&d.parentNode)d.parentNode.removeChild(d);}catch(e){}}" +
+            // Prefer the real add-to-cart form: the one carrying the [name=add] submit button,
+            // then one with a variant-id input. Avoids latching onto the Shop Pay installment
+            // form, which is also action=/cart/add and often appears first in the DOM.
+            "function bestCartForm(){var fs=document.querySelectorAll('form[action*=\"/cart/add\"]'),i;" +
+            "for(i=0;i<fs.length;i++){if(fs[i].querySelector('[name=\"add\"]'))return fs[i];}" +
+            "for(i=0;i<fs.length;i++){if(fs[i].querySelector('input[name=\"id\"],input.product-variant-id'))return fs[i];}" +
+            "return fs[0]||null;}" +
             "function pickerForm(p){" +
             "try{var i=p.querySelector('[form]');if(i){var f=document.getElementById(i.getAttribute('form'));if(f)return f;}}catch(e){}" +
             "try{if(p.closest){var f2=p.closest('form');if(f2)return f2;var pf=p.closest('product-form');if(pf){var f3=pf.querySelector('form');if(f3)return f3;}}}catch(e){}" +
-            "return document.querySelector('form[action*=\"/cart/add\"]');}" +
+            "return bestCartForm();}" +
             "function optsOf(v){return v.options||[v.option1,v.option2,v.option3].filter(function(x){return x!=null;});}" +
             "function matchVariant(vs,picked){var i,k,o;" +
             "for(i=0;i<vs.length;i++){o=optsOf(vs[i]);if(o.length!==picked.length)continue;var ok=true;for(k=0;k<o.length;k++){if(String(o[k])!==String(picked[k])){ok=false;break;}}if(ok)return vs[i];}" +
@@ -579,10 +586,18 @@ public class Browser extends CordovaPlugin {
             "if(rs.length){for(i=0;i<rs.length;i++)picked.push(rs[i].value);}else{var ss=p.querySelectorAll('select');for(i=0;i<ss.length;i++)picked.push(ss[i].value);}" +
             "if(!picked.length)return;var v=matchVariant(vs,picked);if(!v)return;" +
             "var f=pickerForm(p);if(!f)return;" +
-            "var inp=f.querySelector('input[name=\"id\"]');" +
+            "var inp=f.querySelector('input[name=\"id\"]')||f.querySelector('input[name$=\"[id]\"]')||f.querySelector('input.product-variant-id');" +
             "if(!inp){inp=document.createElement('input');inp.type='hidden';inp.name='id';f.appendChild(inp);}" +
+            // Dawn-lineage themes render the variant-id input with the `disabled` attribute and
+            // only un-disable it once the theme JS picks a variant. A disabled input is not
+            // submitted, so a fast tap on Add-to-cart posts /cart/add without `id` and Shopify
+            // rejects it with "Required parameter missing or invalid: items". Force-enable it.
+            "if(inp.disabled){inp.disabled=false;}inp.removeAttribute('disabled');" +
             "if(String(inp.value)!==String(v.id))inp.value=String(v.id);}catch(e){}}" +
-            "function syncAll(){try{var ps=pickers();for(var i=0;i<ps.length;i++)syncPicker(ps[i]);}catch(e){}}" +
+            "function syncAll(){try{var ps=pickers();for(var i=0;i<ps.length;i++)syncPicker(ps[i]);}catch(e){}" +
+            // Backstop for the "theme JS hasn't run at all" case: un-disable any pre-populated
+            // variant-id input so a native /cart/add submit still carries the (first-available) id.
+            "try{var ds=document.querySelectorAll('form[action*=\"/cart/add\"] input[name=\"id\"][disabled],form[action*=\"/cart/add\"] input.product-variant-id[disabled]');for(var k=0;k<ds.length;k++){if(ds[k].value){ds[k].disabled=false;ds[k].removeAttribute(\"disabled\");}}}catch(e){}}" +
             "function isVariantControl(t){try{return !!(t&&t.closest&&t.closest('variant-radios,variant-selects'));}catch(e){return false;}}" +
             "document.addEventListener('change',function(e){if(isVariantControl(e.target))syncAll();},true);" +
             "document.addEventListener('submit',function(e){var f=e.target;if(f&&f.tagName==='FORM'&&/\\/cart\\/add/.test(f.getAttribute('action')||''))syncAll();},true);" +
